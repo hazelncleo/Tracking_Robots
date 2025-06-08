@@ -18,6 +18,7 @@ def apply_robot_tracking(input_video_file : str,
                         plot_velocity = False,
                         plot_file = 'Velocity_Plot.png',
                         orientation = False,
+                        plot_orientation = False,
                         n_prongs = 3,
                         tracking_size = 100,
                         min_area = 800,
@@ -118,18 +119,10 @@ def apply_robot_tracking(input_video_file : str,
             frame = track_orientation(frame, n_prongs, centroids, final_edited_image, tracking_size, frame_size, min_area, max_area, current_frame_number, orientation_angles)
             
 
+        # draw lines showing path of robot over last "n_frames_animate" frames
+        draw_lines(frame, centroids, current_frame_number, n_frames_animate)
         
-        # If the current number of frames is less than n_frames track that many frames, else track last n_frames
-        if current_frame_number <= n_frames_animate:
-            for coord_1,coord_2 in zip(centroids[:-1],centroids[1:]):
-
-                # draw lines
-                cv2.line(frame, (int(coord_1[1]), int(coord_1[0])), (int(coord_2[1]), int(coord_2[0])), (0,0,255), 4) 
-        else:
-            for coord_1,coord_2 in zip(centroids[-n_frames_animate:-1],centroids[-(n_frames_animate+1):]):
-
-                # draw lines
-                cv2.line(frame, (int(coord_1[1]), int(coord_1[0])), (int(coord_2[1]), int(coord_2[0])), (0,0,255), 4) 
+        
                 
         # Apply alpha channel to drawn lines
         frame = cv2.addWeighted(frame, alpha, original_frame, 1-alpha, 0)
@@ -138,21 +131,17 @@ def apply_robot_tracking(input_video_file : str,
         if current_frame_number == 0:
             velocities.append(0)
         else:
-            velocities.append(np.sqrt(np.power((centroids[-1][1] - centroids[-2][1])*pixel_length_ratio*fps, 2) + np.power((centroids[-1][0] - centroids[-2][0])*pixel_length_ratio*fps, 2)))
+            velocities.append(calculate_velocity(centroids,pixel_length_ratio,fps))
+                
+                
         
         # Append the frame to the list of frames
         frames.append(frame)
         
     
-    # Filter the velocity to reduce noise
-    filtered_velocity = lfilter([1/n_filter]*n_filter,1,velocities)   
     
-    # Add the text to the frame and write the frame to the video file
-    for filtered,frame in zip(filtered_velocity,frames):
-        cv2.putText(frame,'Velocity = {:.2f} mm/s'.format(filtered), text_location, fontFace = cv2.FONT_HERSHEY_SIMPLEX, fontScale = 1, color = (0,0,0), thickness = 2)
-        
-        video_out.write(frame)
-            
+    filtered_velocity = add_velocity_text_to_frames(frames, velocities, video_out, n_filter, text_location)
+           
     # Finalize the video
     video_data.release()
 
@@ -165,39 +154,46 @@ def apply_robot_tracking(input_video_file : str,
     print('-----------------------------------')
     
     
-    if orientation:
-        f,ax = plt.subplots(1,1,subplot_kw={'projection': 'polar'})
-
-        
-                    
-        #ax.plot(a,np.arange(len(a)),'-k')
-        #ax.plot(b,np.arange(len(b)),'-r')
-        ax.plot(orientation_angles[0],np.arange(frame_count),'-g')
-        ax.plot(orientation_angles[1],np.arange(frame_count),'-k')
-        ax.plot(orientation_angles[2],np.arange(frame_count),'-r')
-            
-        plt.show()
+    if plot_orientation:
+        plot_orientation_graph(orientation_angles, frame_count)
         
         
-    
-    # If boolean parameter plot_velocity is set to true, then plot the velocity vs time graph
     if plot_velocity:
+        plot_velocity_graph(filtered_velocity, fps, plot_file)
         
-        # Initialize figure
-        f,ax = plt.subplots(1,1)
-        t = np.arange(0,np.size(filtered_velocity)/fps,1/fps)
-        ax.plot(t, filtered_velocity, '-k')
-        
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Velocity (mm/s)')
-        f.suptitle('Velocity of Robot')
-        
-        plt.savefig(plot_file)
-        
-        print('-----------------------------------')
-        print('Velocity plot Saved to: ' + plot_file)
-        print('-----------------------------------')
 
+
+
+
+
+def plot_orientation_graph(orientation_angles, frame_count):
+    
+    f,ax = plt.subplots(1,1,subplot_kw={'projection': 'polar'})
+
+    #ax.plot(a,np.arange(len(a)),'-k')
+    #ax.plot(b,np.arange(len(b)),'-r')
+    ax.plot(orientation_angles[0],np.arange(frame_count),'-g')
+    ax.plot(orientation_angles[1],np.arange(frame_count),'-k')
+    ax.plot(orientation_angles[2],np.arange(frame_count),'-r')
+        
+    plt.show()
+    
+def plot_velocity_graph(filtered_velocity, fps, plot_file):
+    
+    # Initialize figure
+    f,ax = plt.subplots(1,1)
+    t = np.arange(0,np.size(filtered_velocity)/fps,1/fps)
+    ax.plot(t, filtered_velocity, '-k')
+    
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Velocity (mm/s)')
+    f.suptitle('Velocity of Robot')
+    
+    plt.savefig(plot_file)
+    
+    print('-----------------------------------')
+    print('Velocity plot Saved to: ' + plot_file)
+    print('-----------------------------------')
 
 def edit_image_for_tracking(frame,
                             image_threshold_value,
@@ -261,7 +257,7 @@ def track_orientation(frame,
     contours,_ = cv2.findContours(tracking_frame, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     
     # Get the coordinates of the middle of the frame
-    mid_point = np.int32(np.array(np.shape(tracking_frame))/2)
+    mid_point = (np.array(np.shape(tracking_frame))/2).astype(int)
     
     j = 0
     for contour in contours:
@@ -297,7 +293,7 @@ def track_orientation(frame,
     if (current_frame_number == 0) or np.linalg.norm(current_angles) < 1e-6:
         orientation_angles[:,current_frame_number] = current_angles
 
-        draw_line(frame, x, y, orientation_angles[0,current_frame_number])
+        draw_angled_line(frame, x, y, orientation_angles[0,current_frame_number])
     else:
         temp_angles,temp_current_angles = np.meshgrid(orientation_angles[:,current_frame_number-1], current_angles)
         
@@ -305,11 +301,22 @@ def track_orientation(frame,
         
         orientation_angles[:,current_frame_number] = current_angles[np.argmin(difference, axis = 0)]
         
-        draw_line(frame,x,y,orientation_angles[0,current_frame_number])
+        draw_angled_line(frame,x,y,orientation_angles[0,current_frame_number])
         
     return frame
+
+def draw_lines(frame, centroids, current_frame_number, n_frames_animate):
+    
+    # If the current number of frames is less than n_frames track that many frames, else track last n_frames
+    if current_frame_number <= n_frames_animate:
+        for coord_1,coord_2 in zip(centroids[:-1],centroids[1:]):
+            cv2.line(frame, (int(coord_1[1]), int(coord_1[0])), (int(coord_2[1]), int(coord_2[0])), (0,0,255), 4) 
+    else:
+        for coord_1,coord_2 in zip(centroids[-n_frames_animate:-1],centroids[-(n_frames_animate+1):]):
+            cv2.line(frame, (int(coord_1[1]), int(coord_1[0])), (int(coord_2[1]), int(coord_2[0])), (0,0,255), 4) 
+
         
-def draw_line(frame, x, y, angle):
+def draw_angled_line(frame, x, y, angle):
 
     
     y_start = int(y+0*np.cos(angle))
@@ -319,7 +326,9 @@ def draw_line(frame, x, y, angle):
     
     cv2.line(frame, (x_start,y_start), (x_end,y_end), (0,0,0), 6)
     
-    
+def calculate_velocity(centroids, pixel_length_ratio, fps):
+    # calculate velocity using finite differencing of position
+    return np.sqrt(np.power((centroids[-1][1] - centroids[-2][1])*pixel_length_ratio*fps, 2) + np.power((centroids[-1][0] - centroids[-2][0])*pixel_length_ratio*fps, 2))    
         
 def getOrientation(pts, img):
     ## [pca]
@@ -379,6 +388,23 @@ def test_thresholds(video_file, thresholds, border):
         
         cv2.imwrite('thresh_{}.png'.format(threshold), final)
         
+def add_velocity_text_to_frames(frames, velocities, video_out, n_filter, text_location):
+    
+    # Filter the velocity to reduce noise
+    filtered_velocity = lfilter([1/n_filter]*n_filter,1,velocities)   
+    
+    # Add the text to the frame and write the frame to the video file
+    for filtered,frame in zip(filtered_velocity,frames):
+        cv2.putText(frame,'Velocity = {:.2f} mm/s'.format(filtered),
+                    text_location,
+                    fontFace = cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale = 1,
+                    color = (0,0,0),
+                    thickness = 2)
+        
+        video_out.write(frame)
+        
+    return filtered_velocity
         
 def main():
     
