@@ -5,7 +5,24 @@ from scipy.signal import lfilter
 import matplotlib.pyplot as plt
 
 
-def apply_robot_tracking(video_file : str, new_file = 'tracked.mp4', length_ratio = 70/1170, threshold = 160, erode = 9, border = 200, n_frames = 100, alpha = 0.5, n_filter = 15, text_location = (100,100), plot_velocity = False, plot_file = 'Velocity_Plot.png', orientation = False, n_prongs = 3):
+def apply_robot_tracking(input_video_file : str, 
+                        new_video_file = 'tracked.mp4',
+                        pixel_length_ratio = 70/1170,
+                        image_threshold_value = 160,
+                        erode_kernel_size = 9,
+                        border = 200,
+                        n_frames_animate = 100,
+                        alpha = 0.5,
+                        n_filter = 15,
+                        text_location = (100,100),
+                        plot_velocity = False,
+                        plot_file = 'Velocity_Plot.png',
+                        orientation = False,
+                        n_prongs = 3,
+                        tracking_size = 100,
+                        min_area = 800,
+                        max_area = 20000
+                        ):
     '''
     -----------------------------------------------------------------------
     This function will apply the robot tracking algorithm to a specified video file
@@ -57,155 +74,75 @@ def apply_robot_tracking(video_file : str, new_file = 'tracked.mp4', length_rati
     '''
     
     # Import video file to use for tracking
-    vid = cv2.VideoCapture(video_file)
+    video_data = cv2.VideoCapture(input_video_file)
     
     # Video attributes
-    FPS = vid.get(cv2.CAP_PROP_FPS)
-    FRAME_SIZE = (int(vid.get(cv2.CAP_PROP_FRAME_WIDTH)), int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-    FRAME_COUNT = int(vid.get(cv2.CAP_PROP_FRAME_COUNT))
-    FOURCC = cv2.VideoWriter_fourcc(*'XVID')
-    TRACKING_SIZE = 100
-    MIN_AREA = 800
-    MAX_AREA = 20000
+    fps = video_data.get(cv2.CAP_PROP_FPS)
+    frame_size = (int(video_data.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video_data.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    frame_count = int(video_data.get(cv2.CAP_PROP_FRAME_COUNT))
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
     # Initialize video writer object to save the video with tracking added
-    out = cv2.VideoWriter(new_file, FOURCC, FPS, FRAME_SIZE)
+    video_out = cv2.VideoWriter(new_video_file, fourcc, fps, frame_size)
     
-
     # Initialize values
-    i = 0
     centroids = []
     frames = []
     velocities = []
     
-    angles = np.empty((n_prongs,FRAME_COUNT))
+    if orientation:
+        orientation_angles = np.empty((n_prongs,frame_count))
     
     # Loop until no frame returned
-    for i in range(FRAME_COUNT):
+    for current_frame_number in range(frame_count):
         
         # Read next frame
-        ret, frame = vid.read()
+        ret, frame = video_data.read()
         
         # If no frame to be read break from while loop
         if not ret:
             break
         
         # Save a copy of the frame
-        original = frame.copy()
+        original_frame = frame.copy()
         
-        # Convert the frame to grayscale for circle detection
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # edit the frame for robot tracking
+        final_edited_image = edit_image_for_tracking(frame, image_threshold_value, erode_kernel_size, border)
         
-        # Apply thresholding to the frame
-        _,thresh = cv2.threshold(gray_frame, threshold, 255, cv2.THRESH_BINARY)
-        
-        # Erode using an [erode,erode] shaped kernel while excluding a region of 'border' thickness around the edge of the frame
-        if border == 0:
-            final = cv2.erode(thresh, np.ones([erode,erode]))
-        else:
-            eroded = cv2.erode(thresh[border:-border,border:-border], np.ones([erode, erode]))
-        
-            # Fill border with white
-            final = 255 + (0*gray_frame)
-            final[border:-border,border:-border] = eroded
-        
-        # Get coordinates of each black pixel
-        coords = np.column_stack(np.where(final == 0))
-        
-        # Calculate the centroid of all black pixels
-        centroids.append(np.round(np.sum(coords, axis = 0)/np.shape(coords)[0]))
+        # calculate and append the centroid of the black pixels
+        centroids.append(get_centroid(final_edited_image))
         
         
-        # Track Orientation of the robot
+        # track the orientation of the robot
         if orientation:
+            frame = track_orientation(frame, n_prongs, centroids, final_edited_image, tracking_size, frame_size, min_area, max_area, current_frame_number, orientation_angles)
             
-            # Create array of angles for this frame
-            current_angles = np.empty(n_prongs)
-            
-            # get the centroid coordinates of the black pixels for the current frame
-            [y,x] = [int(val) for val in centroids[-1]]
-            
-            
-            # Save a TRACKING_FRAMExTRACKING_FRAME frame around the centroid (this takes into account the size of the frame)
-            tracking_frame = final[np.max([y-TRACKING_SIZE,0]):np.min([y+TRACKING_SIZE,FRAME_SIZE[1]]),np.max([x-TRACKING_SIZE,0]):np.min([x+TRACKING_SIZE,FRAME_SIZE[0]])]
-            
-            # Find all the contours in the tracking frame
-            contours,_ = cv2.findContours(tracking_frame, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-            
-            # Get the coordinates of the middle of the frame
-            mid_point = np.int32(np.array(np.shape(tracking_frame))/2)
-            
-            j = 0
-            for contour in contours:
-                
-                # Calculate the area of the contour
-                area = cv2.contourArea(contour)
-                
-                # If the area is within the threshold then use it for orientation tracking
-                if (area > MIN_AREA) and (area < MAX_AREA) and j < n_prongs:
-                    
-                    # Calculate the angle of a set of a contour using PCA
-                    angle,center = getOrientation(contour,tracking_frame)
-                    
-                    # Calculate the Angle of the centre of the contour
-                    center_angle = np.arctan2(center[0]-mid_point[0],mid_point[1]-center[1])
-                    
-                    # Calculate the difference between the PCA angle and the center angle
-                    diff = np.pi - abs(abs(angle - center_angle) - np.pi)
-
-                    # If the PCA angle is pointing towards the centre of the image flip it by pi radians
-                    if diff > 0.8*np.pi:
-                        if angle < 0:
-                            angle = angle + np.pi
-                        else:
-                            angle = angle - np.pi
-                    
-                    
-                    current_angles[j] = angle
-                    
-                    j += 1
-                    
-            # If first frame, or, no contour angles recorded then assign 
-            if (i == 0) or np.linalg.norm(current_angles) < 1e-6:
-                angles[:,i] = current_angles
-
-                draw_line(frame, x, y, angles[0,i])
-            else:
-                temp_angles,temp_current_angles = np.meshgrid(angles[:,i-1], current_angles)
-                
-                difference = np.pi - np.abs(np.abs(temp_angles-temp_current_angles) - np.pi)
-                
-                angles[:,i] = current_angles[np.argmin(difference, axis = 0)]
-                
-                draw_line(frame,x,y,angles[0,i])
 
         
         # If the current number of frames is less than n_frames track that many frames, else track last n_frames
-        if i <= n_frames:
+        if current_frame_number <= n_frames_animate:
             for coord_1,coord_2 in zip(centroids[:-1],centroids[1:]):
 
                 # draw lines
                 cv2.line(frame, (int(coord_1[1]), int(coord_1[0])), (int(coord_2[1]), int(coord_2[0])), (0,0,255), 4) 
         else:
-            for coord_1,coord_2 in zip(centroids[-n_frames:-1],centroids[-(n_frames+1):]):
+            for coord_1,coord_2 in zip(centroids[-n_frames_animate:-1],centroids[-(n_frames_animate+1):]):
 
                 # draw lines
                 cv2.line(frame, (int(coord_1[1]), int(coord_1[0])), (int(coord_2[1]), int(coord_2[0])), (0,0,255), 4) 
                 
         # Apply alpha channel to drawn lines
-        frame = cv2.addWeighted(frame, alpha, original, 1-alpha, 0)
+        frame = cv2.addWeighted(frame, alpha, original_frame, 1-alpha, 0)
         
         # Set first velocity to 0, else calculate the velocity based on finite difference
-        if i == 0:
+        if current_frame_number == 0:
             velocities.append(0)
         else:
-            velocities.append(np.sqrt(np.power((centroids[-1][1] - centroids[-2][1])*length_ratio*FPS, 2) + np.power((centroids[-1][0] - centroids[-2][0])*length_ratio*FPS, 2)))
+            velocities.append(np.sqrt(np.power((centroids[-1][1] - centroids[-2][1])*pixel_length_ratio*fps, 2) + np.power((centroids[-1][0] - centroids[-2][0])*pixel_length_ratio*fps, 2)))
         
         # Append the frame to the list of frames
         frames.append(frame)
         
-        # Increment i
-        i += 1
     
     # Filter the velocity to reduce noise
     filtered_velocity = lfilter([1/n_filter]*n_filter,1,velocities)   
@@ -214,30 +151,32 @@ def apply_robot_tracking(video_file : str, new_file = 'tracked.mp4', length_rati
     for filtered,frame in zip(filtered_velocity,frames):
         cv2.putText(frame,'Velocity = {:.2f} mm/s'.format(filtered), text_location, fontFace = cv2.FONT_HERSHEY_SIMPLEX, fontScale = 1, color = (0,0,0), thickness = 2)
         
-        out.write(frame)
+        video_out.write(frame)
             
     # Finalize the video
-    vid.release()
+    video_data.release()
 
     # Closes all the frames
     cv2.destroyAllWindows()
     
     print('-----------------------------------')
-    print('Video Tracking Completed for file: ' + video_file)
-    print('Saved to new file: ' + new_file)
+    print('Video Tracking Completed for file: ' + input_video_file)
+    print('Saved to new file: ' + new_video_file)
     print('-----------------------------------')
     
-    f,ax = plt.subplots(1,1,subplot_kw={'projection': 'polar'})
-
     
-                
-    #ax.plot(a,np.arange(len(a)),'-k')
-    #ax.plot(b,np.arange(len(b)),'-r')
-    ax.plot(angles[0],np.arange(FRAME_COUNT),'-g')
-    ax.plot(angles[1],np.arange(FRAME_COUNT),'-k')
-    ax.plot(angles[2],np.arange(FRAME_COUNT),'-r')
+    if orientation:
+        f,ax = plt.subplots(1,1,subplot_kw={'projection': 'polar'})
+
         
-    plt.show()
+                    
+        #ax.plot(a,np.arange(len(a)),'-k')
+        #ax.plot(b,np.arange(len(b)),'-r')
+        ax.plot(orientation_angles[0],np.arange(frame_count),'-g')
+        ax.plot(orientation_angles[1],np.arange(frame_count),'-k')
+        ax.plot(orientation_angles[2],np.arange(frame_count),'-r')
+            
+        plt.show()
         
         
     
@@ -246,7 +185,7 @@ def apply_robot_tracking(video_file : str, new_file = 'tracked.mp4', length_rati
         
         # Initialize figure
         f,ax = plt.subplots(1,1)
-        t = np.arange(0,np.size(filtered_velocity)/FPS,1/FPS)
+        t = np.arange(0,np.size(filtered_velocity)/fps,1/fps)
         ax.plot(t, filtered_velocity, '-k')
         
         ax.set_xlabel('Time (s)')
@@ -258,6 +197,117 @@ def apply_robot_tracking(video_file : str, new_file = 'tracked.mp4', length_rati
         print('-----------------------------------')
         print('Velocity plot Saved to: ' + plot_file)
         print('-----------------------------------')
+
+
+def edit_image_for_tracking(frame,
+                            image_threshold_value,
+                            erode_kernel_size,
+                            border):
+    
+    # Convert the frame to grayscale for circle detection
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply thresholding to the frame
+    _,thresh = cv2.threshold(gray_frame, image_threshold_value, 255, cv2.THRESH_BINARY)
+    
+    # Erode using an [erode,erode] shaped kernel while excluding a region of 'border' thickness around the edge of the frame
+    if border == 0:
+        final_edited_image = cv2.erode(thresh, np.ones([erode_kernel_size,erode_kernel_size]))
+    else:
+        eroded = cv2.erode(thresh[border:-border,border:-border], np.ones([erode_kernel_size, erode_kernel_size]))
+    
+        # Fill border with white
+        final_edited_image = 255 + (0*gray_frame)
+        final_edited_image[border:-border,border:-border] = eroded
+            
+    return final_edited_image 
+
+
+
+
+def get_centroid(final_edited_image):
+    
+    # Get coordinates of each black pixel
+    coords = np.column_stack(np.where(final_edited_image == 0))
+        
+    # Calculate the centroid of all black pixels
+    return np.round(np.sum(coords, axis = 0)/np.shape(coords)[0])
+
+
+def track_orientation(frame,
+                      n_prongs,
+                      centroids,
+                      final_edited_image,
+                      tracking_size,
+                      frame_size,
+                      min_area,
+                      max_area,
+                      current_frame_number,
+                      orientation_angles
+                      ):
+    
+    
+    # Create array of angles for this frame
+    current_angles = np.empty(n_prongs)
+    
+    # get the centroid coordinates of the black pixels for the current frame
+    [y,x] = [int(val) for val in centroids[-1]]
+    
+    
+    # Save a TRACKING_FRAMExTRACKING_FRAME frame around the centroid (this takes into account the size of the frame)
+    tracking_frame = final_edited_image[np.max([y-tracking_size,0]):np.min([y+tracking_size,frame_size[1]]),np.max([x-tracking_size,0]):np.min([x+tracking_size,frame_size[0]])]
+    
+    # Find all the contours in the tracking frame
+    contours,_ = cv2.findContours(tracking_frame, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    
+    # Get the coordinates of the middle of the frame
+    mid_point = np.int32(np.array(np.shape(tracking_frame))/2)
+    
+    j = 0
+    for contour in contours:
+        
+        # Calculate the area of the contour
+        area = cv2.contourArea(contour)
+        
+        # If the area is within the threshold then use it for orientation tracking
+        if (area > min_area) and (area < max_area) and j < n_prongs:
+            
+            # Calculate the angle of a set of a contour using PCA
+            angle,center = getOrientation(contour,tracking_frame)
+            
+            # Calculate the Angle of the centre of the contour
+            center_angle = np.arctan2(center[0]-mid_point[0],mid_point[1]-center[1])
+            
+            # Calculate the difference between the PCA angle and the center angle
+            diff = np.pi - abs(abs(angle - center_angle) - np.pi)
+
+            # If the PCA angle is pointing towards the centre of the image flip it by pi radians
+            if diff > 0.8*np.pi:
+                if angle < 0:
+                    angle = angle + np.pi
+                else:
+                    angle = angle - np.pi
+            
+            
+            current_angles[j] = angle
+            
+            j += 1
+            
+    # If first frame, or, no contour angles recorded then assign 
+    if (current_frame_number == 0) or np.linalg.norm(current_angles) < 1e-6:
+        orientation_angles[:,current_frame_number] = current_angles
+
+        draw_line(frame, x, y, orientation_angles[0,current_frame_number])
+    else:
+        temp_angles,temp_current_angles = np.meshgrid(orientation_angles[:,current_frame_number-1], current_angles)
+        
+        difference = np.pi - np.abs(np.abs(temp_angles-temp_current_angles) - np.pi)
+        
+        orientation_angles[:,current_frame_number] = current_angles[np.argmin(difference, axis = 0)]
+        
+        draw_line(frame,x,y,orientation_angles[0,current_frame_number])
+        
+    return frame
         
 def draw_line(frame, x, y, angle):
 
@@ -339,7 +389,16 @@ def main():
         test_thresholds('Robotic_Movement.mp4', thresholds = [0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,210,220,230,240,250], border = 50)
     
     if True:
-        apply_robot_tracking('Robotic_Movement.mp4', plot_velocity = False, new_file = 'tracked_new.mp4', border = 50, threshold = 140, erode = 18, length_ratio = 75/1056, n_frames = 15, orientation = True)
+        apply_robot_tracking('3Prong_1.mp4',
+                            plot_velocity=False,
+                            new_video_file='tracked_3Prong_1.mp4',
+                            border=50,
+                            image_threshold_value=140,
+                            erode_kernel_size=18,
+                            pixel_length_ratio=75/1056,
+                            n_frames_animate=15,
+                            orientation=True
+                            )
     
     if False:
         frame = cv2.imread('test.png')
